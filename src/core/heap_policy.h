@@ -4,10 +4,15 @@
 #include <cstdint>
 
 namespace HeapPolicy {
-    // TLS gating thresholds
+    // TLS gating thresholds.
+    // The big ~16KB mbedTLS IN record buffer is served from the static TlsArena
+    // (see core/tls_arena), not the heap — so the heap only needs to host the
+    // ~16KB OUT buffer plus small handshake allocs. The contiguous requirement
+    // is therefore ~20KB, not the full ~35KB the un-arena'd handshake once needed.
+    // (free-heap floor kept conservative; it passes comfortably in practice.)
     static constexpr size_t kMinHeapForTls = 35000;
-    static constexpr size_t kMinContigForTls = 35000;
-    static constexpr size_t kProactiveTlsConditioning = 45000;
+    static constexpr size_t kMinContigForTls = 20000;
+    static constexpr size_t kProactiveTlsConditioning = 28000;
 
     // General allocation safety thresholds
     static constexpr size_t kMinHeapForOinkNetworkAdd = 30000;
