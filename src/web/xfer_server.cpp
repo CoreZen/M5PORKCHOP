@@ -64,8 +64,11 @@ static const char* XP_WPA_AWARDED_FILE = nullptr;
 static const char* XP_WIGLE_AWARDED_FILE = nullptr;
 static const char* WPA_SENT_FILE = nullptr;
 static const char* WIGLE_UPLOADED_FILE = nullptr;
+static const char* XP_PWNCRACK_AWARDED_FILE = nullptr;
+static const char* PWNCRACK_UPLOADED_FILE = nullptr;
 static const uint16_t XP_WPA_PER = 15;
 static const uint16_t XP_WIGLE_PER = 10;
+static const uint16_t XP_PWNCRACK_PER = 15;  // parity with WPA-SEC
 static const uint16_t XP_SESSION_CAP = 200;
 static const size_t MIN_PCAP_BYTES = 300;
 static const size_t MIN_WIGLE_BYTES = 200;
@@ -76,17 +79,22 @@ static uint16_t xpSessionAwarded = 0;
 static bool xpScanPending = false;
 static bool xpWpaLoaded = false;
 static bool xpWigleLoaded = false;
+static bool xpPwncrackLoaded = false;
 static bool xpWpaCacheComplete = false;
 static bool xpWigleCacheComplete = false;
-struct XpAwardEntry { char key[40]; };  // 12-char BSSID or WiGLE filename (was 80)
+static bool xpPwncrackCacheComplete = false;
+struct XpAwardEntry { char key[40]; };  // 12-char BSSID or WiGLE/pwncrack filename (was 80)
 static std::vector<XpAwardEntry> xpAwardedWpa;
 static std::vector<XpAwardEntry> xpAwardedWigle;
+static std::vector<XpAwardEntry> xpAwardedPwncrack;
 
 static void refreshSdPaths() {
     XP_WPA_AWARDED_FILE = SDLayout::xpAwardedWpaPath();
     XP_WIGLE_AWARDED_FILE = SDLayout::xpAwardedWiglePath();
     WPA_SENT_FILE = SDLayout::wpasecSentPath();
     WIGLE_UPLOADED_FILE = SDLayout::wigleUploadedPath();
+    XP_PWNCRACK_AWARDED_FILE = SDLayout::xpAwardedPwncrackPath();
+    PWNCRACK_UPLOADED_FILE = SDLayout::pwncrackUploadedPath();
 }
 
 static void logWiFiStatus(const char* label) {
@@ -537,6 +545,9 @@ static void scanXpAwards() {
 
     loadAwardedList(XP_WPA_AWARDED_FILE, xpAwardedWpa, xpWpaLoaded, xpWpaCacheComplete);
     loadAwardedList(XP_WIGLE_AWARDED_FILE, xpAwardedWigle, xpWigleLoaded, xpWigleCacheComplete);
+    if (XP_PWNCRACK_AWARDED_FILE) {
+        loadAwardedList(XP_PWNCRACK_AWARDED_FILE, xpAwardedPwncrack, xpPwncrackLoaded, xpPwncrackCacheComplete);
+    }
 
     // WPA-SEC awards — zero String allocations in loop
     File wpaFile = SD.open(WPA_SENT_FILE, FILE_READ);
@@ -602,6 +613,34 @@ static void scanXpAwards() {
             awardXpEntry("WIGLE", XP_WIGLE_PER, XP_WIGLE_AWARDED_FILE, xpAwardedWigle, fname);
         }
         wigleFile.close();
+    }
+
+    // pwncrack awards — per uploaded .22000 file (filename key, like WiGLE)
+    if (PWNCRACK_UPLOADED_FILE && XP_PWNCRACK_AWARDED_FILE) {
+        File pwnFile = SD.open(PWNCRACK_UPLOADED_FILE, FILE_READ);
+        if (pwnFile) {
+            char lineBuf[128];
+            char pathBuf[160];
+            const char* hsDir = SDLayout::handshakesDir();
+
+            while (pwnFile.available() && xpSessionAwarded < XP_SESSION_CAP) {
+                yield();
+                size_t len = pwnFile.readBytesUntil('\n', lineBuf, sizeof(lineBuf) - 1);
+                lineBuf[len] = '\0';
+                while (len > 0 && (lineBuf[len - 1] == '\r' || lineBuf[len - 1] == ' ')) {
+                    lineBuf[--len] = '\0';
+                }
+                if (len == 0) continue;
+
+                const char* fname = basenameFromPath(lineBuf);
+                if (isAwarded(XP_PWNCRACK_AWARDED_FILE, fname, xpAwardedPwncrack, xpPwncrackLoaded, xpPwncrackCacheComplete)) continue;
+                // Validity: the uploaded .22000 must still exist on the SD
+                snprintf(pathBuf, sizeof(pathBuf), "%s/%s", hsDir, fname);
+                if (!SD.exists(pathBuf)) continue;
+                awardXpEntry("PWNCRACK", XP_PWNCRACK_PER, XP_PWNCRACK_AWARDED_FILE, xpAwardedPwncrack, fname);
+            }
+            pwnFile.close();
+        }
     }
 }
 
@@ -1099,7 +1138,7 @@ body.mc{
    ---------------------------------------------------------------------- */
 .ops{
   display:grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 0;
   margin: var(--frame-gap);
   border: 1px solid var(--border);
@@ -1193,7 +1232,8 @@ body.mc{
   letter-spacing: .4px;
   color: var(--fg);
 }
-.queue-head.wpa, .queue-row.wpa{
+.queue-head.wpa, .queue-row.wpa,
+.queue-head.pwncrack, .queue-row.pwncrack{
   grid-template-columns:
     minmax(18ch, 1.55fr)
     minmax(10ch, 1.00fr)
@@ -1491,7 +1531,8 @@ input[type="text"]:focus{
   .ops{ grid-template-columns: 1fr; }
   .ops-panel + .ops-panel{ border-left:none; border-top: 1px solid var(--border); }
   .file-size{ display:none; }
-  .queue-head.wpa, .queue-row.wpa{
+  .queue-head.wpa, .queue-row.wpa,
+  .queue-head.pwncrack, .queue-row.pwncrack{
     grid-template-columns: minmax(18ch, 1.7fr) minmax(9ch, 1fr) minmax(9ch, 1fr) 9ch;
   }
   .queue-head.wigle, .queue-row.wigle{
@@ -1523,10 +1564,12 @@ let queueLoading = false;
 const creds = {
     wpaKey: '',
     wigleUser: '',
-    wigleToken: ''
+    wigleToken: '',
+    pwncrackKey: ''
 };
 let wpaQueue = [];
 let wigleQueue = [];
+let pwncrackQueue = [];
 let wpaResultsHandle = null;
 let swineTimer = null;
 let wpaAuthGateShown = false;
@@ -1577,6 +1620,7 @@ async function loadConfigFromDevice() {
     creds.wpaKey = '';
     creds.wigleUser = '';
     creds.wigleToken = '';
+    creds.pwncrackKey = '';
     try {
         const r = await queuedFetch('/api/creds');
         if (r.ok) {
@@ -1584,6 +1628,7 @@ async function loadConfigFromDevice() {
             creds.wpaKey = (cfg.wpaSecKey || '').trim();
             creds.wigleUser = (cfg.wigleApiName || '').trim();
             creds.wigleToken = (cfg.wigleApiToken || '').trim();
+            creds.pwncrackKey = (cfg.pwncrackKey || '').trim();
         }
     } catch(e) {
         // keep defaults
@@ -1594,12 +1639,15 @@ async function loadConfigFromDevice() {
 function updateCredsStatus() {
     const wpa = creds.wpaKey ? 'LOADED' : 'MISSING';
     const wigle = (creds.wigleUser && creds.wigleToken) ? 'LOADED' : 'MISSING';
+    const pwn = creds.pwncrackKey ? 'LOADED' : 'MISSING';
     const wpaEl = document.getElementById('wpaMeta');
     const wigleEl = document.getElementById('wigleMeta');
+    const pwnEl = document.getElementById('pwncrackMeta');
     if (wpaEl) {
         wpaEl.textContent = 'KEY: ' + wpa;
     }
     if (wigleEl) wigleEl.textContent = 'CREDS: ' + wigle;
+    if (pwnEl) pwnEl.textContent = 'KEY: ' + pwn;
 }
 
 function setWpaAuthState(state) {
@@ -1996,8 +2044,10 @@ async function loadQueues() {
     try {
         wpaQueue = await buildWpaQueue();
         wigleQueue = await buildWigleQueue();
+        pwncrackQueue = await buildPwncrackQueue();
         renderWpaQueue();
         renderWigleQueue();
+        renderPwncrackQueue();
     } catch (e) {
         addSysLog('QUEUE LOAD FAILED: ' + describeError(e));
     } finally {
@@ -2194,6 +2244,91 @@ function renderWigleQueue() {
         html += '<div class="queue-row wigle' + dim + '" title="' + escapeHtml(item.path) + '">';
         html += '<div>' + escapeHtml(item.name) + '</div>';
         html += '<div>' + escapeHtml(nets) + '</div>';
+        html += '<div class="queue-status ' + cls + '">' + item.status + '</div>';
+        html += '</div>';
+    });
+    list.innerHTML = html;
+}
+
+// pwncrack potfile format: HASH:BSSID:CLIENTMAC:ESSID:PASSWORD
+// BSSID is the 2nd field; password is everything after the 4th colon
+// (the password may itself contain colons).
+function parsePwncrackResultsMap(text) {
+    const out = new Map();
+    text.split(/\r?\n/).forEach(line => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        const parts = trimmed.split(':');
+        if (parts.length < 5) return;
+        const bssid = normalizeBssid(parts[1]);
+        if (bssid.length < 12) return;
+        const pass = parts.slice(4).join(':');
+        if (!pass) return;
+        out.set(bssid, { pass });
+    });
+    return out;
+}
+
+async function buildPwncrackQueue() {
+    const [items, uploadedText, resultsText] = await Promise.all([
+        listDir(HANDSHAKES_DIR),
+        fetchDeviceText('/m5porkchop/pwncrack/pwncrack_uploaded.txt'),
+        fetchDeviceText('/m5porkchop/pwncrack/pwncrack_potfile.txt')
+    ]);
+    // pwncrack tracks uploads by filename
+    const uploadedSet = parseUploadedPaths(uploadedText);
+    const resultsMap = parsePwncrackResultsMap(resultsText);
+    const queue = [];
+    for (const item of items) {
+        if (!item || item.isDir) continue;
+        const nameLower = (item.name || '').toLowerCase();
+        // Only .22000 files (both _hs.22000 handshakes and bare .22000 PMKID)
+        if (!nameLower.endsWith('.22000')) continue;
+        let base = stripExtension(item.name);
+        if (base.endsWith('_hs')) base = base.substring(0, base.length - 3);
+        const bssidKey = normalizeBssid(base);
+        const result = resultsMap.get(bssidKey);
+        // SSID source order: .txt sidecar, then the filename prefix (capture
+        // names are SSID_BSSID), then '--'. pwncrack potfiles carry no SSID.
+        let ssid = await readHandshakeSSID(base);
+        if (!ssid) {
+            const us = base.lastIndexOf('_');
+            ssid = us > 0 ? base.substring(0, us) : '';
+        }
+        if (!ssid) ssid = '--';
+        const pass = result ? result.pass : '';
+        let status = 'LOCAL';
+        if (bssidKey && result) status = 'CRACKED';
+        else if (uploadedSet.has(item.name)) status = 'UPLOADED';
+        queue.push({
+            path: HANDSHAKES_DIR + '/' + item.name,
+            name: item.name,
+            bssidKey,
+            ssid,
+            pass,
+            status
+        });
+    }
+    queue.sort((a, b) => a.name.localeCompare(b.name));
+    return queue;
+}
+
+function renderPwncrackQueue() {
+    const list = document.getElementById('pwncrackQueue');
+    if (!list) return;
+    if (!pwncrackQueue.length) {
+        list.innerHTML = '<div class="queue-row pwncrack queue-dim"><div>--</div><div>--</div><div>--</div><div class="queue-status">EMPTY</div></div>';
+        return;
+    }
+    let html = '';
+    pwncrackQueue.forEach(item => {
+        const dim = item.status === 'LOCAL' ? ' queue-dim' : '';
+        const cls = statusClassFor(item.status);
+        const pass = item.pass ? item.pass : '--';
+        html += '<div class="queue-row pwncrack' + dim + '" title="' + escapeHtml(item.path) + '">';
+        html += '<div>' + escapeHtml(item.name) + '</div>';
+        html += '<div>' + escapeHtml(item.ssid) + '</div>';
+        html += '<div>' + escapeHtml(pass) + '</div>';
         html += '<div class="queue-status ' + cls + '">' + item.status + '</div>';
         html += '</div>';
     });
@@ -2482,6 +2617,7 @@ function showCredsModal() {
     document.getElementById('credWpaKey').value = creds.wpaKey || '';
     document.getElementById('credWigleName').value = creds.wigleUser || '';
     document.getElementById('credWigleToken').value = creds.wigleToken || '';
+    document.getElementById('credPwncrackKey').value = creds.pwncrackKey || '';
     document.getElementById('credsModal').style.display = 'flex';
     setTimeout(() => document.getElementById('credWpaKey').focus(), 50);
 }
@@ -2494,6 +2630,7 @@ async function saveCreds() {
     const wpaKey = document.getElementById('credWpaKey').value.trim();
     const wigleName = document.getElementById('credWigleName').value.trim();
     const wigleToken = document.getElementById('credWigleToken').value.trim();
+    const pwncrackKey = document.getElementById('credPwncrackKey').value.trim();
     try {
         const r = await queuedFetch('/api/creds', {
             method: 'POST',
@@ -2501,13 +2638,15 @@ async function saveCreds() {
             body: JSON.stringify({
                 wpaSecKey: wpaKey,
                 wigleApiName: wigleName,
-                wigleApiToken: wigleToken
+                wigleApiToken: wigleToken,
+                pwncrackKey: pwncrackKey
             })
         });
         if (r.ok) {
             creds.wpaKey = wpaKey;
             creds.wigleUser = wigleName;
             creds.wigleToken = wigleToken;
+            creds.pwncrackKey = pwncrackKey;
             updateCredsStatus();
             hideCredsModal();
             addSysLog('CREDENTIALS SAVED');
@@ -2523,6 +2662,7 @@ async function clearCreds() {
     document.getElementById('credWpaKey').value = '';
     document.getElementById('credWigleName').value = '';
     document.getElementById('credWigleToken').value = '';
+    document.getElementById('credPwncrackKey').value = '';
     await saveCreds();
 }
 
@@ -2883,7 +3023,11 @@ function triggerUploadPicker() {
 }
 
 function normalizeBssid(raw) {
-    return raw.replace(/[^a-fA-F0-9]/g, '').toUpperCase();
+    // A BSSID is 12 hex chars. Capture filenames are SSID_BSSID, and the SSID can
+    // contain hex letters (e.g. SARIT2 -> A,2), so keep only the trailing 12 hex
+    // to avoid the SSID polluting the key.
+    const hex = raw.replace(/[^a-fA-F0-9]/g, '').toUpperCase();
+    return hex.length > 12 ? hex.slice(-12) : hex;
 }
 
 async function fetchDeviceBlob(path) {
@@ -3032,6 +3176,16 @@ function wpaOpenResults() {
     const url = 'https://wpa-sec.stanev.org/?api&dl=1&key=' + encodeURIComponent(creds.wpaKey);
     window.open(url, '_blank');
     addWpaLog('RESULTS TAB OPENED');
+}
+
+function pwncrackOpenResults() {
+    if (!creds.pwncrackKey) {
+        addSysLog('PWNCRACK KEY MISSING - SET IN CREDS');
+        return;
+    }
+    const url = 'https://pwncrack.org/download_potfile_script?key=' + encodeURIComponent(creds.pwncrackKey);
+    window.open(url, '_blank');
+    addSysLog('PWNCRACK POTFILE TAB OPENED');
 }
 
 async function applyWpasecResultsFile(file) {
@@ -3291,6 +3445,25 @@ static const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
                 <div class="ops-header">
                     <span class="ops-decor-left">────────────────────────────────────────────────────────────────────────────────┤</span>
                     <span class="ops-title-wrap">
+                        <span class="ops-title">PWNCRACK QUEUE</span>
+                        <span class="ops-meta ops-meta-link" id="pwncrackMeta" onclick="showCredsModal()">KEY: UNKNOWN</span>
+                        <span class="ops-actions">
+                            <button class="btn btn-outline" id="btnPwncrackOpen" onclick="pwncrackOpenResults()">POT FILE</button>
+                        </span>
+                    </span>
+                    <span class="ops-decor-right">├────────────────────────────────────────────────────────────────────────────────</span>
+                </div>
+                <div class="queue-head pwncrack">
+                    <div>FILE</div><div>SSID</div><div>PASS</div><div class="queue-status">ST</div>
+                </div>
+                <div class="queue-list" id="pwncrackQueue"></div>
+            </div>
+        </div>
+        <div class="ops-panel">
+            <div class="ops-block">
+                <div class="ops-header">
+                    <span class="ops-decor-left">────────────────────────────────────────────────────────────────────────────────┤</span>
+                    <span class="ops-title-wrap">
                         <span class="ops-title">WIGLE QUEUE</span>
                         <span class="ops-meta ops-meta-link" id="wigleMeta" onclick="showCredsModal()">CREDS: UNKNOWN</span>
                         <span class="ops-actions">
@@ -3445,6 +3618,11 @@ BACKSPACE      PARENT FOLDER
                 <input type="text" id="credWigleToken" placeholder="WIGLE API TOKEN" maxlength="64" spellcheck="false" autocomplete="off"
                        onkeydown="if(event.key==='Escape')hideCredsModal()">
             </div>
+            <div style="margin-bottom:10px">
+                <div style="color:var(--dim);font-size:0.85em;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.3px">PWNCRACK KEY</div>
+                <input type="text" id="credPwncrackKey" placeholder="PWNCRACK API KEY" maxlength="64" spellcheck="false" autocomplete="off"
+                       onkeydown="if(event.key==='Escape')hideCredsModal()">
+            </div>
             <div class="modal-tip">SAVED TO DEVICE CONFIG. PERSISTS ACROSS REBOOTS.</div>
             <div class="modal-actions">
                 <button class="btn" onclick="saveCreds()">SAVE</button>
@@ -3585,10 +3763,14 @@ void XferServer::startServer() {
     xpAwardedWpa.shrink_to_fit();
     xpAwardedWigle.clear();
     xpAwardedWigle.shrink_to_fit();
+    xpAwardedPwncrack.clear();
+    xpAwardedPwncrack.shrink_to_fit();
     xpWpaLoaded = false;
     xpWigleLoaded = false;
+    xpPwncrackLoaded = false;
     xpWpaCacheComplete = false;
     xpWigleCacheComplete = false;
+    xpPwncrackCacheComplete = false;
 }
 
 void XferServer::stop() {
@@ -3644,10 +3826,14 @@ void XferServer::stop() {
     xpAwardedWpa.shrink_to_fit();
     xpAwardedWigle.clear();
     xpAwardedWigle.shrink_to_fit();
+    xpAwardedPwncrack.clear();
+    xpAwardedPwncrack.shrink_to_fit();
     xpWpaLoaded = false;
     xpWigleLoaded = false;
+    xpPwncrackLoaded = false;
     xpWpaCacheComplete = false;
     xpWigleCacheComplete = false;
+    xpPwncrackCacheComplete = false;
 }
 
 void XferServer::update() {
@@ -3882,14 +4068,15 @@ void XferServer::handleCreds() {
         return;
     }
     const WiFiConfig& w = Config::wifi();
-    char eKey[80], eName[80], eToken[80];
+    char eKey[80], eName[80], eToken[80], ePwn[80];
     jsonEscapeStr(eKey, sizeof(eKey), w.wpaSecKey);
     jsonEscapeStr(eName, sizeof(eName), w.wigleApiName);
     jsonEscapeStr(eToken, sizeof(eToken), w.wigleApiToken);
-    char json[384];
+    jsonEscapeStr(ePwn, sizeof(ePwn), w.pwncrackKey);
+    char json[512];
     snprintf(json, sizeof(json),
-             "{\"wpaSecKey\":\"%s\",\"wigleApiName\":\"%s\",\"wigleApiToken\":\"%s\"}",
-             eKey, eName, eToken);
+             "{\"wpaSecKey\":\"%s\",\"wigleApiName\":\"%s\",\"wigleApiToken\":\"%s\",\"pwncrackKey\":\"%s\"}",
+             eKey, eName, eToken, ePwn);
     server->sendHeader("Connection", "close");
     server->sendHeader("Cache-Control", "no-store");
     server->send(200, "application/json", json);
@@ -3952,6 +4139,11 @@ void XferServer::handleCredsSave() {
     strncpy(apiTokenBuf, apiToken, sizeof(apiTokenBuf) - 1);
     apiTokenBuf[sizeof(apiTokenBuf) - 1] = '\0';
 
+    const char* pwnKey = jsonExtractStr(raw, "pwncrackKey");
+    char pwnKeyBuf[65];
+    strncpy(pwnKeyBuf, pwnKey, sizeof(pwnKeyBuf) - 1);
+    pwnKeyBuf[sizeof(pwnKeyBuf) - 1] = '\0';
+
     // Write to config
     WiFiConfig cfg = Config::wifi();
     strncpy(cfg.wpaSecKey, wpaKeyBuf, sizeof(cfg.wpaSecKey) - 1);
@@ -3960,12 +4152,15 @@ void XferServer::handleCredsSave() {
     cfg.wigleApiName[sizeof(cfg.wigleApiName) - 1] = '\0';
     strncpy(cfg.wigleApiToken, apiTokenBuf, sizeof(cfg.wigleApiToken) - 1);
     cfg.wigleApiToken[sizeof(cfg.wigleApiToken) - 1] = '\0';
+    strncpy(cfg.pwncrackKey, pwnKeyBuf, sizeof(cfg.pwncrackKey) - 1);
+    cfg.pwncrackKey[sizeof(cfg.pwncrackKey) - 1] = '\0';
     Config::setWiFi(cfg);
 
-    Serial.printf("[FILESERVER] Creds saved: wpa=%s wigle=%s/%s\n",
+    Serial.printf("[FILESERVER] Creds saved: wpa=%s wigle=%s/%s pwncrack=%s\n",
                   wpaKeyBuf[0] ? "(SET)" : "(EMPTY)",
                   apiNameBuf[0] ? "(SET)" : "(EMPTY)",
-                  apiTokenBuf[0] ? "(SET)" : "(EMPTY)");
+                  apiTokenBuf[0] ? "(SET)" : "(EMPTY)",
+                  pwnKeyBuf[0] ? "(SET)" : "(EMPTY)");
 
     server->sendHeader("Connection", "close");
     server->send(200, "application/json", "{\"ok\":true}");
