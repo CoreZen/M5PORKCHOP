@@ -17,6 +17,7 @@ private:
     static bool keyWasPressed;
     static uint16_t cachedWpaCracked;
     static uint16_t cachedWigleUploaded;
+    static uint16_t cachedPwncrackCracked;
     static uint32_t lastStatRefreshMs;
     static uint32_t statRefreshIntervalMs;
     static void saveSnapshot();

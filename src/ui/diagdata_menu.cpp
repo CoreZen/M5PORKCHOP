@@ -9,6 +9,7 @@
 #include "../core/config.h"
 #include "../web/wpasec.h"
 #include "../web/wigle.h"
+#include "../web/pwncrack.h"
 #include "../core/sd_layout.h"
 #include "../core/heap_health.h"
 #include "../core/heap_policy.h"
@@ -22,6 +23,7 @@ bool DiagDataMenu::active = false;
 bool DiagDataMenu::keyWasPressed = false;
 uint16_t DiagDataMenu::cachedWpaCracked = 0;
 uint16_t DiagDataMenu::cachedWigleUploaded = 0;
+uint16_t DiagDataMenu::cachedPwncrackCracked = 0;
 uint32_t DiagDataMenu::lastStatRefreshMs = 0;
 uint32_t DiagDataMenu::statRefreshIntervalMs = 2000;  // tighter refresh interval
 
@@ -223,8 +225,12 @@ void DiagDataMenu::refreshStats() {
     if (!WiGLE::isBusy()) {
         cachedWigleUploaded = WiGLE::getUploadedCount();
     }
+    if (!Pwncrack::isBusy()) {
+        cachedPwncrackCracked = Pwncrack::getCrackedCount();
+    }
     WPASec::freeCacheMemory();
     WiGLE::freeUploadedListMemory();
+    Pwncrack::freeCacheMemory();
     lastStatRefreshMs = millis();
 }
 
@@ -347,6 +353,10 @@ void DiagDataMenu::draw(M5Canvas& canvas) {
     y += lineH;
     canvas.drawString("WIGLE:", 4, y);
     snprintf(cacheBuf, sizeof(cacheBuf), "%u UPLOADED", (unsigned)cachedWigleUploaded);
+    canvas.drawString(cacheBuf, 80, y);
+    y += lineH;
+    canvas.drawString("PWNCRACK:", 4, y);
+    snprintf(cacheBuf, sizeof(cacheBuf), "%u CRACKED", (unsigned)cachedPwncrackCracked);
     canvas.drawString(cacheBuf, 80, y);
     y += lineH + 6;
 

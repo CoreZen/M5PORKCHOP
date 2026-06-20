@@ -40,6 +40,8 @@ enum SettingId : uint8_t {
     SET_WIGLE_NAME_STATUS,
     SET_WIGLE_TOKEN_STATUS,
     SET_WIGLE_LOAD,
+    SET_PWNCRACK_STATUS,
+    SET_PWNCRACK_LOAD,
     SET_CH_HOP,
     SET_SPEC_SWEEP,
     SET_SPEC_TILT,
@@ -126,7 +128,9 @@ static const EntryData kIntegEntries[] = {
     {SET_WPASEC_LOAD, "KEY LOAD", SettingType::ACTION, 0, 0, 0, "", "READ /WPASEC_KEY.TXT (ROOT|M5PORKCHOP)"},
     {SET_WIGLE_NAME_STATUS, "WGL NAME", SettingType::TEXT, 0, 0, 0, "", "WIGLE.NET API NAME"},
     {SET_WIGLE_TOKEN_STATUS, "WGL TKN", SettingType::TEXT, 0, 0, 0, "", "WIGLE.NET API TOKEN"},
-    {SET_WIGLE_LOAD, "WGL LOAD", SettingType::ACTION, 0, 0, 0, "", "READ /WIGLE_KEY.TXT (ROOT|M5PORKCHOP)"}
+    {SET_WIGLE_LOAD, "WGL LOAD", SettingType::ACTION, 0, 0, 0, "", "READ /WIGLE_KEY.TXT (ROOT|M5PORKCHOP)"},
+    {SET_PWNCRACK_STATUS, "PWNCRACK", SettingType::TEXT, 0, 0, 0, "", "PWNCRACK.ORG API KEY"},
+    {SET_PWNCRACK_LOAD, "PWN LOAD", SettingType::ACTION, 0, 0, 0, "", "READ /PWNCRACK_KEY.TXT (ROOT|M5PORKCHOP)"}
 };
 
 static const EntryData kRadioEntries[] = {
@@ -369,6 +373,33 @@ static void formatWpaSecStatus(char* out, size_t len) {
     out[len - 1] = '\0';
 }
 
+static void formatPwncrackStatus(char* out, size_t len) {
+    if (!out || len == 0) return;
+    const char* key = Config::wifi().pwncrackKey;
+    size_t keyLen = strlen(key);
+    if (keyLen == 0) {
+        strncpy(out, "UNSET", len - 1);
+        out[len - 1] = '\0';
+        return;
+    }
+    if (keyLen < 8) {
+        size_t keep = (keyLen < 2) ? keyLen : 2;
+        if (keep >= len) keep = len - 1;
+        memcpy(out, key, keep);
+        if (keep + 3 < len) {
+            memcpy(out + keep, "...", 3);
+            out[keep + 3] = '\0';
+        } else {
+            out[keep] = '\0';
+        }
+        return;
+    }
+    char tmp[16];
+    snprintf(tmp, sizeof(tmp), "%.3s...%.2s", key, key + keyLen - 2);
+    strncpy(out, tmp, len - 1);
+    out[len - 1] = '\0';
+}
+
 static void formatWigleNameStatus(char* out, size_t len) {
     if (!out || len == 0) return;
     const char* name = Config::wifi().wigleApiName;
@@ -442,6 +473,9 @@ static void getSettingTextBuf(SettingId id, char* out, size_t len) {
         case SET_WIGLE_TOKEN_STATUS:
             formatWigleTokenStatus(out, len);
             return;
+        case SET_PWNCRACK_STATUS:
+            formatPwncrackStatus(out, len);
+            return;
         case SET_CALLSIGN:
             if (!XP::hasUnlockable(2)) {
                 strncpy(out, "[LOCKED]", len - 1);
@@ -468,6 +502,8 @@ static size_t getTextLimit(SettingId id) {
             return sizeof(Config::wifi().wigleApiName) - 1;
         case SET_WIGLE_TOKEN_STATUS:
             return sizeof(Config::wifi().wigleApiToken) - 1;
+        case SET_PWNCRACK_STATUS:
+            return sizeof(Config::wifi().pwncrackKey) - 1;
         case SET_CALLSIGN:
             return sizeof(Config::personality().callsign) - 1;
         default:
@@ -877,6 +913,11 @@ static bool setSettingText(SettingId id, const char* value) {
             strncpy(Config::wifi().wigleApiToken, value, sizeof(Config::wifi().wigleApiToken) - 1);
             Config::wifi().wigleApiToken[sizeof(Config::wifi().wigleApiToken) - 1] = '\0';
             return true;
+        case SET_PWNCRACK_STATUS:
+            if (strcmp(Config::wifi().pwncrackKey, value) == 0) return false;
+            strncpy(Config::wifi().pwncrackKey, value, sizeof(Config::wifi().pwncrackKey) - 1);
+            Config::wifi().pwncrackKey[sizeof(Config::wifi().pwncrackKey) - 1] = '\0';
+            return true;
         case SET_CALLSIGN:
             if (strcmp(Config::personality().callsign, value) == 0) return false;
             strncpy(Config::personality().callsign, value, sizeof(Config::personality().callsign) - 1);
@@ -1202,6 +1243,18 @@ void SettingsMenu::handleInput() {
                             Display::notify(NoticeKind::WARNING, "NO KEY FILE");
                         } else {
                             Display::notify(NoticeKind::WARNING, "INVALID FORMAT");
+                        }
+                    } else if (entry.id == SET_PWNCRACK_LOAD) {
+                        if (Config::loadPwncrackKeyFromFile()) {
+                            Display::notify(NoticeKind::STATUS, "PWNCRACK KEY LOADED");
+                        } else if (!Config::isSDAvailable()) {
+                            Display::notify(NoticeKind::WARNING, "NO SD CARD");
+                        } else if (!SD.exists(SDLayout::pwncrackKeyPath()) &&
+                                   !SD.exists(SDLayout::legacyPwncrackKeyPath()) &&
+                                   !SD.exists("/m5porkchop/pwncrack/pwncrack_key.txt")) {
+                            Display::notify(NoticeKind::WARNING, "NO KEY FILE");
+                        } else {
+                            Display::notify(NoticeKind::WARNING, "INVALID KEY");
                         }
                     }
                     break;

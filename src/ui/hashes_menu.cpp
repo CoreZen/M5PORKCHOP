@@ -10,6 +10,7 @@
 #include "display.h"
 #include "../core/tls.h"
 #include "../web/wpasec.h"
+#include "../web/pwncrack.h"
 #include "../core/config.h"
 #include "../core/sd_layout.h"
 #include "../core/wifi_utils.h"
@@ -46,7 +47,7 @@ const char* const HashesMenu::HINTS[] = {
     "YOUR LOOT. YOUR PROBLEM."
 };
 
-// WPA-SEC Sync state
+// WPA-SEC / pwncrack Sync state
 bool HashesMenu::syncModalActive = false;
 SyncState HashesMenu::syncState = SyncState::IDLE;
 char HashesMenu::syncStatusText[48] = "";
@@ -153,6 +154,7 @@ void HashesMenu::hide() {
     captures.clear();
     captures.shrink_to_fit();  // Release vector capacity
     WPASec::freeCacheMemory();
+    Pwncrack::freeCacheMemory();
     
     // Reset all async state to prevent leaks (redundant after emergencyCleanup but safe)
     scanInProgress = false;
@@ -175,7 +177,8 @@ void HashesMenu::emergencyCleanup() {
     captures.clear();
     captures.shrink_to_fit();
     WPASec::freeCacheMemory();
-    
+    Pwncrack::freeCacheMemory();
+
     // Stop any in-progress operations
     scanInProgress = false;
     wpasecUpdateInProgress = false;
@@ -480,8 +483,14 @@ void HashesMenu::processAsyncWPASecUpdate() {
             } else {
                 cap.status = CaptureStatus::LOCAL;
             }
+            // Check pwncrack independently (separate service, separate badge).
+            // pwncrack tracks uploads by filename (no per-BSSID list).
+            cap.pwncrackCracked = Pwncrack::isCracked(cap.bssid);
+            cap.pwncrackUploaded = Pwncrack::isUploaded(cap.filename);
         } else {
             cap.status = CaptureStatus::LOCAL;
+            cap.pwncrackCracked = false;
+            cap.pwncrackUploaded = false;
         }
 
         wpasecUpdateProgress++;
@@ -604,11 +613,11 @@ void HashesMenu::handleInput() {
         }
     }
     
-    // S key triggers WPA-SEC sync
+    // S key triggers a sync to every configured service (wpa-sec + pwncrack)
     if (M5Cardputer.Keyboard.isKeyPressed('s') || M5Cardputer.Keyboard.isKeyPressed('S')) {
         startSync();
     }
-    
+
     // Nuke all loot with D key
     if (M5Cardputer.Keyboard.isKeyPressed('d') || M5Cardputer.Keyboard.isKeyPressed('D')) {
         if (!captures.empty()) {
@@ -751,11 +760,15 @@ void HashesMenu::draw(M5Canvas& canvas) {
         }
         canvas.print(ssidBuf);
 
-        // Status column
+        // Status column — WPA-SEC and pwncrack shown distinctly
         canvas.setCursor(120, y);
-        if (cap.status == CaptureStatus::CRACKED) {
-            canvas.print("[OK]");
-        } else if (cap.status == CaptureStatus::UPLOADED) {
+        if (cap.status == CaptureStatus::CRACKED && cap.pwncrackCracked) {
+            canvas.print("[2x]");  // Both services cracked it
+        } else if (cap.status == CaptureStatus::CRACKED) {
+            canvas.print("[OK]");  // WPA-SEC cracked
+        } else if (cap.pwncrackCracked) {
+            canvas.print("[PC]");  // Pwncrack cracked
+        } else if (cap.status == CaptureStatus::UPLOADED || cap.pwncrackUploaded) {
             canvas.print("[..]");
         } else {
             canvas.print("[--]");
@@ -996,21 +1009,66 @@ void HashesMenu::drawDetailView(M5Canvas& canvas) {
     // BSSID
     canvas.drawString(cap.bssid, centerX, boxY + 16);
 
-    // Cracked captures: show password (more useful than HS details)
-    if (cap.status == CaptureStatus::CRACKED) {
-        canvas.drawString("** CR4CK3D **", centerX, boxY + 32);
-        char pwLine[24];
-        size_t pwLen = strlen(cap.password);
-        if (pwLen > 20) {
-            memcpy(pwLine, cap.password, 18);
-            pwLine[18] = '.';
-            pwLine[19] = '.';
-            pwLine[20] = '\0';
-        } else {
-            strncpy(pwLine, cap.password, sizeof(pwLine) - 1);
-            pwLine[sizeof(pwLine) - 1] = '\0';
+    // Check both WPA-SEC and pwncrack crack status independently by BSSID.
+    // cap.status/cap.password reflects WPA-SEC only (set in processAsyncWPASecUpdate).
+    bool wpasecCracked = (cap.status == CaptureStatus::CRACKED && cap.password[0] != '\0');
+    bool pwncrackCracked = false;
+    char pcPass[24] = "";
+    if (cap.bssid[0] != '\0') {
+        pwncrackCracked = Pwncrack::isCracked(cap.bssid);
+        if (pwncrackCracked) {
+            const char* pw = Pwncrack::getPassword(cap.bssid);
+            size_t pwLen = strlen(pw);
+            if (pwLen > 20) {
+                memcpy(pcPass, pw, 18);
+                pcPass[18] = '.';
+                pcPass[19] = '.';
+                pcPass[20] = '\0';
+            } else {
+                strncpy(pcPass, pw, sizeof(pcPass) - 1);
+                pcPass[sizeof(pcPass) - 1] = '\0';
+            }
         }
-        canvas.drawString(pwLine, centerX, boxY + 48);
+    }
+
+    if (wpasecCracked || pwncrackCracked) {
+        if (wpasecCracked && pwncrackCracked) {
+            // Both services cracked it — show each on its own line
+            char wpaLine[28];
+            size_t wlen = strlen(cap.password);
+            char wpaBuf[21];
+            if (wlen > 20) {
+                memcpy(wpaBuf, cap.password, 18);
+                wpaBuf[18] = '.'; wpaBuf[19] = '.'; wpaBuf[20] = '\0';
+            } else {
+                strncpy(wpaBuf, cap.password, sizeof(wpaBuf) - 1);
+                wpaBuf[sizeof(wpaBuf) - 1] = '\0';
+            }
+            snprintf(wpaLine, sizeof(wpaLine), "WPA: %s", wpaBuf);
+            char pcLine[28];
+            snprintf(pcLine, sizeof(pcLine), "PWN: %s", pcPass);
+            canvas.drawString("** CR4CK3D x2 **", centerX, boxY + 26);
+            canvas.drawString(wpaLine, centerX, boxY + 40);
+            canvas.drawString(pcLine, centerX, boxY + 54);
+        } else if (wpasecCracked) {
+            char pwLine[24];
+            size_t pwLen = strlen(cap.password);
+            if (pwLen > 20) {
+                memcpy(pwLine, cap.password, 18);
+                pwLine[18] = '.'; pwLine[19] = '.'; pwLine[20] = '\0';
+            } else {
+                strncpy(pwLine, cap.password, sizeof(pwLine) - 1);
+                pwLine[sizeof(pwLine) - 1] = '\0';
+            }
+            canvas.drawString("WPA-SEC CR4CK3D", centerX, boxY + 32);
+            canvas.drawString(pwLine, centerX, boxY + 48);
+        } else {
+            // pwncrack only
+            char pcLine[28];
+            snprintf(pcLine, sizeof(pcLine), "PWN: %s", pcPass);
+            canvas.drawString("PWNCRACK CR4CK3D", centerX, boxY + 32);
+            canvas.drawString(pcLine, centerX, boxY + 48);
+        }
         return;
     }
 
@@ -1144,8 +1202,8 @@ void HashesMenu::disconnectWiFi() {
 }
 
 void HashesMenu::startSync() {
-    Serial.println("[HASHES] Starting WPA-SEC sync...");
-    
+    Serial.println("[HASHES] Starting hash sync...");
+
     // Reset sync state
     syncModalActive = true;
     syncState = SyncState::CONNECTING_WIFI;
@@ -1157,19 +1215,21 @@ void HashesMenu::startSync() {
     syncFailed = 0;
     syncCracked = 0;
     syncStartTime = millis();
-    
-    // Pre-flight checks
-    if (!WPASec::hasApiKey()) {
-        strncpy(syncError, "NO WPA-SEC KEY", sizeof(syncError) - 1);
+
+    // Sync fans out to every configured service: wpa-sec (pcaps/handshakes) and
+    // pwncrack (.22000/PMKID). Need at least one key set.
+    if (!WPASec::hasApiKey() && !Pwncrack::hasApiKey()) {
+        strncpy(syncError, "NO SYNC KEYS", sizeof(syncError) - 1);
         syncState = SyncState::ERROR;
         return;
     }
-    
+
     // Free memory before heavy operations
     captures.clear();
     captures.shrink_to_fit();
     WPASec::freeCacheMemory();
-    
+    Pwncrack::freeCacheMemory();
+
     Serial.printf("[HASHES] Heap after freeing: %u\n", (unsigned int)ESP.getFreeHeap());
 }
 
@@ -1212,19 +1272,33 @@ void HashesMenu::processSyncState() {
                 strncpy(syncStatusText, "SYNCING...", sizeof(syncStatusText) - 1);
 
                 // Lend the idle main-canvas buffer to mbedTLS as its allocation
-                // arena for the blocking sync (see tracks_menu for rationale).
+                // arena for the blocking sync (see core/tls for rationale).
+                // One arena spans both services — they run sequentially.
                 Tls::arenaBegin(Display::mainCanvasBuffer(), Display::mainCanvasBufferSize());
-                WPASecSyncResult result = WPASec::syncCaptures(onSyncProgress);
+
+                // Fan out to every configured service. Results accumulate; the
+                // first error (if any) is surfaced. Counts reset in startSync().
+                if (WPASec::hasApiKey()) {
+                    WPASecSyncResult r = WPASec::syncCaptures(onSyncProgress);
+                    syncUploaded += r.uploaded;
+                    syncFailed   += r.failed;
+                    syncCracked  += r.cracked;
+                    if (r.error[0] != '\0' && syncError[0] == '\0') {
+                        strncpy(syncError, r.error, sizeof(syncError) - 1);
+                    }
+                }
+                if (Pwncrack::hasApiKey()) {
+                    PwncrackSyncResult r = Pwncrack::syncCaptures(onSyncProgress);
+                    syncUploaded += r.uploaded;
+                    syncFailed   += r.failed;
+                    syncCracked  += r.cracked;
+                    if (r.error[0] != '\0' && syncError[0] == '\0') {
+                        strncpy(syncError, r.error, sizeof(syncError) - 1);
+                    }
+                }
+
                 Tls::arenaEnd();
 
-                syncUploaded = result.uploaded;
-                syncFailed = result.failed;
-                syncCracked = result.cracked;
-                
-                if (result.error[0] != '\0') {
-                    strncpy(syncError, result.error, sizeof(syncError) - 1);
-                }
-                
                 syncState = SyncState::COMPLETE;
             }
             break;
@@ -1267,7 +1341,8 @@ void HashesMenu::drawSyncModal(M5Canvas& canvas) {
     int centerX = canvas.width() / 2;
     
     // Title
-    canvas.drawString("WPA-SEC SYNC", centerX, boxY + 6);
+    canvas.drawString("HASH SYNC",
+                      centerX, boxY + 6);
     
     if (syncState == SyncState::ERROR) {
         // Error state

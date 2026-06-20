@@ -25,6 +25,7 @@
 #include "../modes/oink.h"
 #include "../web/wpasec.h"
 #include "../web/wigle.h"
+#include "../web/pwncrack.h"
 
 
 #ifndef PIGSYNC_LOG_ENABLED
@@ -1924,6 +1925,7 @@ bool PigSyncMode::startSync() {
     // Free caches and suspend sprites for maximum heap before data transfer
     WPASec::freeCacheMemory();
     WiGLE::freeUploadedListMemory();
+    Pwncrack::freeCacheMemory();
     delay(200);
     yield();
     

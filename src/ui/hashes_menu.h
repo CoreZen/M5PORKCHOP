@@ -18,14 +18,16 @@ struct CaptureInfo {
     char filename[48];
     char ssid[33];
     char bssid[18];
-    bool isPMKID;         // Packed after bssid — eliminates 4 bytes padding
+    bool isPMKID;           // Packed after bssid — eliminates 4 bytes padding
+    bool pwncrackCracked;   // Set during async status update if pwncrack has a result
+    bool pwncrackUploaded;  // Set during async status update if uploaded to pwncrack
     uint32_t fileSize;
-    time_t captureTime;   // File modification time
-    CaptureStatus status; // WPA-SEC status
-    char password[64];    // Cracked password (if status == CRACKED)
+    time_t captureTime;     // File modification time
+    CaptureStatus status;   // WPA-SEC status
+    char password[64];      // Cracked password (if status == CRACKED, WPA-SEC)
 };
 
-// Sync state machine for WPA-SEC operations
+// Sync state machine for WPA-SEC / pwncrack operations
 enum class SyncState {
     IDLE,
     CONNECTING_WIFI,
@@ -106,9 +108,9 @@ private:
     static uint8_t syncFailed;
     static uint16_t syncCracked;
     static char syncError[48];
-    
+
     // Sync operations
-    static void startSync();
+    static void startSync();          // sync to all configured services (S key)
     static void processSyncState();
     static void drawSyncModal(M5Canvas& canvas);
     static void cancelSync();
