@@ -38,17 +38,23 @@ namespace SDLayout {
     const char* xpBackupPath();
     const char* xpAwardedWpaPath();
     const char* xpAwardedWiglePath();
+    const char* xpAwardedPwncrackPath();
     const char* boarBrosPath();
     const char* heapLogPath();
     const char* heapWatermarksPath();
     const char* wpasecKeyPath();
     const char* wigleKeyPath();
+    const char* pwncrackDir();
+    const char* pwncrackUploadedPath();
+    const char* pwncrackResultsPath();
+    const char* pwncrackKeyPath();
 
     // Legacy paths (explicit, for fallback imports)
     const char* legacyConfigPath();
     const char* legacyPersonalityPath();
     const char* legacyWpasecKeyPath();
     const char* legacyWigleKeyPath();
+    const char* legacyPwncrackKeyPath();
 
     // Filename helpers
     void sanitizeSsid(const char* ssid, char* out, size_t outLen);

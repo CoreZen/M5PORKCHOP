@@ -40,7 +40,7 @@ static bool sdAvailable = false;
 
 // ---- Binary config blob (zero heap allocation) ----
 static constexpr uint32_t CONFIG_MAGIC   = 0x504F524B;  // 'PORK'
-static constexpr uint16_t CONFIG_VERSION = 1;
+static constexpr uint16_t CONFIG_VERSION = 2;  // v2: pwncrackKey grouped into the WiFi block (v1 migrated on read)
 #define CONFIG_BIN_FILE "/porkchop.dat"
 
 static const char* configBinPathSD() {
@@ -83,6 +83,7 @@ struct __attribute__((packed)) ConfigBlob {
     char     wpaSecKey[33];
     char     wigleApiName[65];
     char     wigleApiToken[65];
+    char     pwncrackKey[65];
 
     // BLE
     uint16_t burstInterval;
@@ -141,6 +142,7 @@ static void populateBlob(ConfigBlob& b, const GPSConfig& gps, const WiFiConfig& 
     strncpy(b.wpaSecKey,     wifi.wpaSecKey,     sizeof(b.wpaSecKey) - 1);
     strncpy(b.wigleApiName,  wifi.wigleApiName,  sizeof(b.wigleApiName) - 1);
     strncpy(b.wigleApiToken, wifi.wigleApiToken, sizeof(b.wigleApiToken) - 1);
+    strncpy(b.pwncrackKey,   wifi.pwncrackKey,   sizeof(b.pwncrackKey) - 1);
 
     b.burstInterval = ble.burstInterval;
     b.advDuration   = ble.advDuration;
@@ -207,18 +209,51 @@ static bool readBlobFrom(fs::FS& fs, const char* path, ConfigBlob& b) {
     size_t fileSize = file.size();
     if (fileSize < 8) { file.close(); return false; }  // too small for header
 
-    size_t readSize = (fileSize < sizeof(b)) ? fileSize : sizeof(b);
-    memset(&b, 0, sizeof(b));
-    size_t got = file.read((uint8_t*)&b, readSize);
+    // Read raw bytes first so older layouts can be migrated before mapping.
+    uint8_t raw[sizeof(ConfigBlob)];
+    size_t readSize = (fileSize < sizeof(raw)) ? fileSize : sizeof(raw);
+    size_t got = file.read(raw, readSize);
     file.close();
+    if (got < 8) return false;
 
-    if (got < 8 || b.magic != CONFIG_MAGIC) return false;
-    // Detect stale blobs from older builds (different struct size)
-    if (b.blobSize > 0 && b.blobSize != sizeof(ConfigBlob)) {
-        Serial.printf("[CONFIG] Blob size mismatch: stored=%u expected=%u\n",
-                      b.blobSize, (unsigned)sizeof(ConfigBlob));
+    uint32_t magic;
+    uint16_t fileVersion;
+    memcpy(&magic, raw, sizeof(magic));
+    memcpy(&fileVersion, raw + sizeof(magic), sizeof(fileVersion));
+    if (magic != CONFIG_MAGIC) return false;
+
+    memset(&b, 0, sizeof(b));
+
+    if (fileVersion < 2) {
+        // v1 had no pwncrackKey inside the WiFi block. Splice into the v2 layout:
+        // copy the prefix up to pwncrackKey verbatim, leave pwncrackKey zeroed,
+        // and shift the remainder of the old blob past the inserted field. This
+        // preserves every other setting across the upgrade.
+        const size_t splitOff = offsetof(ConfigBlob, pwncrackKey);
+        const size_t keySize  = sizeof(b.pwncrackKey);
+        size_t prefix = (got < splitOff) ? got : splitOff;
+        memcpy(&b, raw, prefix);
+        if (got > splitOff) {
+            size_t suffixLen = got - splitOff;
+            size_t dstMax = sizeof(b) - splitOff - keySize;
+            if (suffixLen > dstMax) suffixLen = dstMax;
+            memcpy((uint8_t*)&b + splitOff + keySize, raw + splitOff, suffixLen);
+        }
+        b.version  = CONFIG_VERSION;
+        b.blobSize = sizeof(ConfigBlob);
+        Serial.printf("[CONFIG] Migrated v%u blob '%s' -> v%u (%u bytes)\n",
+                      fileVersion, path, CONFIG_VERSION, (unsigned)got);
+    } else {
+        size_t copyLen = (got < sizeof(b)) ? got : sizeof(b);
+        memcpy(&b, raw, copyLen);
+        if (b.blobSize > 0 && b.blobSize != sizeof(ConfigBlob)) {
+            Serial.printf("[CONFIG] Blob size mismatch: stored=%u expected=%u\n",
+                          b.blobSize, (unsigned)sizeof(ConfigBlob));
+        }
+        Serial.printf("[CONFIG] readBlobFrom: '%s' v%u, %u bytes\n", path, b.version, (unsigned)got);
     }
-    Serial.printf("[CONFIG] readBlobFrom: '%s' v%u, %u bytes\n", path, b.version, got);
+
+    if (b.magic != CONFIG_MAGIC) return false;
     return true;
 }
 
@@ -263,6 +298,8 @@ static void extractBlob(const ConfigBlob& b, GPSConfig& gps, WiFiConfig& wifi,
     wifi.wigleApiName[sizeof(wifi.wigleApiName) - 1] = '\0';
     strncpy(wifi.wigleApiToken, b.wigleApiToken, sizeof(wifi.wigleApiToken) - 1);
     wifi.wigleApiToken[sizeof(wifi.wigleApiToken) - 1] = '\0';
+    strncpy(wifi.pwncrackKey,   b.pwncrackKey,   sizeof(wifi.pwncrackKey) - 1);
+    wifi.pwncrackKey[sizeof(wifi.pwncrackKey) - 1] = '\0';
 
     ble.burstInterval = b.burstInterval;
     ble.advDuration   = b.advDuration;
@@ -422,6 +459,9 @@ bool Config::init() {
     }
     if (loadWigleKeyFromFile()) {
         Serial.println("[CONFIG] WiGLE API keys loaded from file");
+    }
+    if (loadPwncrackKeyFromFile()) {
+        Serial.println("[CONFIG] pwncrack key loaded from file");
     }
 
     // Merge creds from JSON porkchop.conf if present (handles the case where
@@ -1056,6 +1096,55 @@ bool Config::loadWigleKeyFromFile() {
         SDLog::log("CFG", "WiGLE API keys imported from file");
     } else {
         Serial.println("[CONFIG] Warning: Could not delete WiGLE key file");
+    }
+
+    return true;
+}
+
+bool Config::loadPwncrackKeyFromFile() {
+    const char* keyFile = SDLayout::pwncrackKeyPath();
+    const char* legacyKeyFile = SDLayout::legacyPwncrackKeyPath();
+    static constexpr const char* kNewKeyFile = "/m5porkchop/pwncrack/pwncrack_key.txt";
+
+    if (!sdAvailable) {
+        return false;
+    }
+    // Mixed-layout fallback: if SDLayout is out of sync with what's on disk, still accept the key.
+    if (!SD.exists(keyFile)) {
+        if (SD.exists(kNewKeyFile)) keyFile = kNewKeyFile;
+        else if (SD.exists(legacyKeyFile)) keyFile = legacyKeyFile;
+    }
+    if (!SD.exists(keyFile)) return false;
+
+    File f = SD.open(keyFile, FILE_READ);
+    if (!f) {
+        Serial.println("[CONFIG] Failed to open pwncrack key file");
+        return false;
+    }
+
+    char key[80];
+    size_t keyLen = f.readBytesUntil('\n', key, sizeof(key) - 1);
+    key[keyLen] = '\0';
+    f.close();
+    // Trim trailing whitespace
+    while (keyLen > 0 && (key[keyLen - 1] == '\r' || key[keyLen - 1] == ' ')) {
+        key[--keyLen] = '\0';
+    }
+
+    if (keyLen < 8 || keyLen > 64) {
+        Serial.printf("[CONFIG] Invalid pwncrack key length: %d (expected 8-64)\n", (int)keyLen);
+        return false;
+    }
+
+    strncpy(wifiConfig.pwncrackKey, key, sizeof(wifiConfig.pwncrackKey) - 1);
+    wifiConfig.pwncrackKey[sizeof(wifiConfig.pwncrackKey) - 1] = '\0';
+    save();
+
+    if (SD.remove(keyFile)) {
+        Serial.println("[CONFIG] Deleted pwncrack key file after import");
+        SDLog::log("CFG", "pwncrack key imported from file");
+    } else {
+        Serial.println("[CONFIG] Warning: Could not delete pwncrack key file");
     }
 
     return true;
