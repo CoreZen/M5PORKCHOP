@@ -6,7 +6,7 @@
 #include <WiFi.h>
 #include <string.h>
 #include "display.h"
-#include "../core/tls_arena.h"
+#include "../core/tls.h"
 #include "../web/wigle.h"
 #include "../core/config.h"
 #include "../core/sd_layout.h"
@@ -844,9 +844,9 @@ void TracksMenu::processSyncState() {
                 // from this static buffer instead of the heap, so the handshake fits
                 // without freeing/re-allocating anything (no heap fragmentation).
                 // Safe: the render loop is blocked here, so the canvas isn't drawn.
-                TlsArena::begin(Display::mainCanvasBuffer(), Display::mainCanvasBufferSize());
+                Tls::arenaBegin(Display::mainCanvasBuffer(), Display::mainCanvasBufferSize());
                 WigleSyncResult result = WiGLE::syncFiles(onSyncProgress);
-                TlsArena::end();
+                Tls::arenaEnd();
 
                 syncUploaded = result.uploaded;
                 syncFailed = result.failed;
