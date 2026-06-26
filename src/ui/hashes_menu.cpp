@@ -15,6 +15,7 @@
 #include "../core/sd_layout.h"
 #include "../core/wifi_utils.h"
 #include "../core/heap_health.h"
+#include "../core/network_recon.h"
 #include <esp_heap_caps.h>
 
 // Static member initialization
@@ -1276,6 +1277,13 @@ void HashesMenu::processSyncState() {
                 // One arena spans both services — they run sequentially.
                 Tls::arenaBegin(Display::mainCanvasBuffer(), Display::mainCanvasBufferSize());
 
+                // Pause NetworkRecon — TLS operations conflict with promiscuous mode
+                bool wasReconRunning = NetworkRecon::isRunning();
+                if (wasReconRunning) {
+                    Serial.println("[HASH_SYNC] Pausing NetworkRecon for TLS operations");
+                    NetworkRecon::pause();
+                    NetworkRecon::freeNetworks();  // Release ~19KB for TLS headroom
+                }
                 // Fan out to every configured service. Results accumulate; the
                 // first error (if any) is surfaced. Counts reset in startSync().
                 if (WPASec::hasApiKey()) {
@@ -1295,6 +1303,11 @@ void HashesMenu::processSyncState() {
                     if (r.error[0] != '\0' && syncError[0] == '\0') {
                         strncpy(syncError, r.error, sizeof(syncError) - 1);
                     }
+                }
+                // Resume NetworkRecon after sync operations complete
+                if (wasReconRunning) {
+                    Serial.println("[HASH_SYNC] Resuming NetworkRecon after TLS operations");
+                    NetworkRecon::resume();
                 }
 
                 Tls::arenaEnd();

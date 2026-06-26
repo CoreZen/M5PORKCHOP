@@ -7,7 +7,6 @@
 #include "../core/heap_gates.h"
 #include "../core/tls.h"
 #include "../core/wifi_utils.h"
-#include "../core/network_recon.h"
 #include "../piglet/mood.h"
 #include <SD.h>
 #include <WiFi.h>
@@ -587,26 +586,15 @@ WPASecSyncResult WPASec::syncCaptures(WPASecProgressCallback cb) {
     
     busy = true;
     
-    // Pause NetworkRecon - TLS operations conflict with promiscuous mode
-    // conditionHeapForTLS() overrides promiscuous callbacks, breaking NetworkRecon state
-    bool wasReconRunning = NetworkRecon::isRunning();
-    if (wasReconRunning) {
-        Serial.println("[WPASEC] Pausing NetworkRecon for TLS operations");
-        NetworkRecon::pause();
-        NetworkRecon::freeNetworks();  // Release ~19KB for TLS headroom
-    }
-    
     // Pre-flight checks
     if (!hasApiKey()) {
         strncpy(result.error, "NO WPA-SEC KEY", sizeof(result.error) - 1);
-        if (wasReconRunning) NetworkRecon::resume();
         busy = false;
         return result;
     }
     
     if (WiFi.status() != WL_CONNECTED) {
         strncpy(result.error, "WIFI NOT CONNECTED", sizeof(result.error) - 1);
-        if (wasReconRunning) NetworkRecon::resume();
         busy = false;
         return result;
     }
@@ -645,7 +633,6 @@ WPASecSyncResult WPASec::syncCaptures(WPASecProgressCallback cb) {
             Mood::setStatusMessage("HEAP TIGHT - TRY OINK");
             snprintf(result.error, sizeof(result.error), 
                      "%s (TRY OINK)", lastError);
-            if (wasReconRunning) NetworkRecon::resume();
             busy = false;
             return result;
         }
@@ -661,7 +648,6 @@ WPASecSyncResult WPASec::syncCaptures(WPASecProgressCallback cb) {
     const char* hsDir = SDLayout::handshakesDir();
     if (!SD.exists(hsDir)) {
         strncpy(result.error, "NO HANDSHAKES DIR", sizeof(result.error) - 1);
-        if (wasReconRunning) NetworkRecon::resume();
         busy = false;
         return result;
     }
@@ -873,12 +859,6 @@ WPASecSyncResult WPASec::syncCaptures(WPASecProgressCallback cb) {
         result.success = (result.failed == 0);
     } else {
         result.success = (result.failed == 0);
-    }
-    
-    // Resume NetworkRecon after sync operations complete
-    if (wasReconRunning) {
-        Serial.println("[WPASEC] Resuming NetworkRecon after TLS operations");
-        NetworkRecon::resume();
     }
     
     busy = false;
